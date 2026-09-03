@@ -592,8 +592,8 @@ function pomo {
     Write-Host "$label dimulai: $mins menit. Ctrl+C untuk berhenti." -ForegroundColor Cyan
 
     for ($s = $totalSeconds; $s -ge 0; $s--) {
-        $m = [math]::Floor($s / 60)
-        $sec = $s % 60
+        $m = [int][math]::Floor($s / 60)
+        $sec = [int]($s % 60)
         Write-Host -NoNewline ("`r{0:D2}:{1:D2} tersisa   " -f $m, $sec)
         Start-Sleep -Seconds 1
     }
