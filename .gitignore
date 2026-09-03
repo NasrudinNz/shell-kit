@@ -1,0 +1,24 @@
+# =========================================================
+#  PSTools — .gitignore
+#  Data pribadi tersimpan di folder data/ — jangan di-unggah.
+# =========================================================
+
+# Abaikan seluruh folder data (catatan pribadi, bookmark, snippet)
+data/
+data/*.md
+
+# File sistem / editor
+Thumbs.db
+.DS_Store
+*.swp
+*~
+.vscode/
+.idea/
+
+# PowerShell / session
+*.ps1su
+profile.ps1
+
+# Log & temporary
+*.log
+*.tmp
