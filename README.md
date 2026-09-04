@@ -152,4 +152,3 @@ PSTools/
 
 ## Lisensi
 
-Sesuaikan dengan keinginan (misal MIT). See [LICENSE](LICENSE) (opsional).
