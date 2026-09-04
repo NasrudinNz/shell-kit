@@ -24,6 +24,9 @@ if (-not (Test-Path $Global:PSToolsDataDir)) {
     New-Item -Path $Global:PSToolsDataDir -ItemType Directory -Force | Out-Null
 }
 
+# File TODO terakhir yang ditampilkan/digunakan
+$Global:PSToolsLastTodoFile = "notes"
+
 function Join-ArgsFrom {
     param($Arr, $StartIndex)
     if ($Arr.Count -le $StartIndex) { return "" }
@@ -60,22 +63,31 @@ function todo {
         [string[]]$Arguments
     )
 
-    $FileName = "notes"
+    # Gunakan file TODO terakhir yang ditampilkan/digunakan
+    $FileName = $Global:PSToolsLastTodoFile
 
+    $dashIndex = -1
     if ($Arguments.Count -gt 0) {
-        $dashIndex = -1
         for ($i = 0; $i -lt $Arguments.Count; $i++) {
-            if ($Arguments[$i] -eq "-") { $dashIndex = $i; break }
-        }
-        if ($dashIndex -ge 0 -and ($dashIndex + 1) -lt $Arguments.Count) {
-            $FileName = $Arguments[$dashIndex + 1]
-            if ($dashIndex -gt 0) {
-                $Arguments = $Arguments[0..($dashIndex - 1)]
-            } else {
-                $Arguments = @()
+            if ($Arguments[$i] -eq "-") {
+                $dashIndex = $i
+                break
             }
         }
     }
+
+    # Jika ada "- namafile", gunakan file tersebut
+    if ($dashIndex -ge 0 -and ($dashIndex + 1) -lt $Arguments.Count) {
+        $FileName = $Arguments[$dashIndex + 1]
+        if ($dashIndex -gt 0) {
+            $Arguments = $Arguments[0..($dashIndex - 1)]
+        } else {
+            $Arguments = @()
+        }
+    }
+
+    # Simpan sebagai file TODO terakhir yang aktif
+    $Global:PSToolsLastTodoFile = $FileName
 
     $FileName = $FileName -replace '\.md$', ''
     $file = Join-Path $Global:PSToolsDataDir "$FileName.md"
@@ -115,7 +127,9 @@ function todo {
             Write-Host ""
             Write-Host "Ditambahkan: $Text" -ForegroundColor Green
             Write-Host "File: $FileName.md"
-            Write-Host ""
+
+            # Tampilkan kembali daftar TODO aktif
+            todo list - $FileName
         }
 
         "list" {
@@ -158,6 +172,7 @@ function todo {
                 $lines[$number - 1] = $lines[$number - 1] -replace '^- \[ \]', '- [x]'
                 $lines | Set-Content $file
                 Write-Host "Task $number selesai." -ForegroundColor Green
+                todo list - $FileName
             } else {
                 Write-Host "Task sudah selesai atau bukan TODO."
             }
@@ -179,6 +194,7 @@ function todo {
                 $lines[$number - 1] = $lines[$number - 1] -replace '^- \[x\]', '- [ ]'
                 $lines | Set-Content $file
                 Write-Host "Task $number dikembalikan." -ForegroundColor Yellow
+                todo list - $FileName
             }
         }
 
@@ -198,6 +214,7 @@ function todo {
             $lines.RemoveAt($number - 1)
             $lines | Set-Content $file
             Write-Host "Dihapus: $task" -ForegroundColor Green
+            todo list - $FileName
         }
 
         default {
