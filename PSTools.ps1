@@ -54,6 +54,49 @@ $Global:PSToolsPomoHistoryFile = Join-Path $Global:PSToolsDataDir "pomodoro-hist
 #  HELPER
 # =========================================================
 
+function Show-TodoProgress {
+    param(
+        [int]$Total,
+        [int]$Done,
+        [int]$Width = 30
+    )
+
+    if ($Total -le 0) {
+        return
+    }
+
+    $percent = [int][math]::Round(
+        ($Done / $Total) * 100
+    )
+
+    $filled = [int][math]::Round(
+        ($percent / 100) * $Width
+    )
+
+    if ($filled -gt $Width) {
+        $filled = $Width
+    }
+
+    if ($filled -lt 0) {
+        $filled = 0
+    }
+
+    $empty = $Width - $filled
+
+    $bar =
+        ("█" * $filled) +
+        ("░" * $empty)
+
+    Write-Host (
+        "Progress: {0} {1,3}% ({2}/{3})" -f
+        $bar,
+        $percent,
+        $Done,
+        $Total
+    ) -ForegroundColor Cyan
+}
+
+
 function Join-ArgsFrom {
     param($Arr, $StartIndex)
 
@@ -112,6 +155,38 @@ function Format-ShortDuration {
     }
 
     return "{0}s" -f $secs
+}
+
+
+function Format-MarkdownText {
+    param(
+        [string]$Text
+    )
+
+    if ([string]::IsNullOrEmpty($Text)) {
+        return $Text
+    }
+
+    $esc = [char]27
+
+    # Render basic Markdown emphasis without changing the stored task text.
+    $Text = [regex]::Replace(
+        $Text,
+        '\*\*\*(.+?)\*\*\*',
+        "${esc}[1m${esc}[3m`$1${esc}[22m${esc}[23m"
+    )
+    $Text = [regex]::Replace(
+        $Text,
+        '\*\*(.+?)\*\*',
+        "${esc}[1m`$1${esc}[22m"
+    )
+    $Text = [regex]::Replace(
+        $Text,
+        '(?<!\*)\*([^*]+?)\*(?!\*)',
+        "${esc}[3m`$1${esc}[23m"
+    )
+
+    return $Text
 }
 
 
@@ -587,31 +662,21 @@ function todo {
 
     $FileName = $Global:PSToolsLastTodoFile
 
-    # Cari separator "-"
-    $dashIndex = -1
-
-    if ($Arguments.Count -gt 0) {
-
-        for ($i = 0; $i -lt $Arguments.Count; $i++) {
-
-            if ($Arguments[$i] -eq "-") {
-
-                $dashIndex = $i
-                break
-            }
-        }
+    # Nama file adalah argumen terakhir jika subperintah menerimanya.
+    $minimumArgumentsForFile = switch ($Command) {
+        "list"   { 1 }
+        "done"   { 2 }
+        "undone" { 2 }
+        "remove" { 2 }
+        "add"    { 2 }
+        default  { 0 }
     }
 
-    # Ambil nama file
-    if (
-        $dashIndex -ge 0 -and
-        ($dashIndex + 1) -lt $Arguments.Count
-    ) {
+    if ($Arguments.Count -ge $minimumArgumentsForFile) {
+        $FileName = $Arguments[$Arguments.Count - 1]
 
-        $FileName = $Arguments[$dashIndex + 1]
-
-        if ($dashIndex -gt 0) {
-            $Arguments = $Arguments[0..($dashIndex - 1)]
+        if ($Arguments.Count -gt 1) {
+            $Arguments = @($Arguments[0..($Arguments.Count - 2)])
         }
         else {
             $Arguments = @()
@@ -641,11 +706,11 @@ function todo {
         Write-Host "================================"
         Write-Host ""
         Write-Host "USAGE:"
-        Write-Host '  todo add "task" - namafile'
-        Write-Host '  todo list - namafile'
-        Write-Host '  todo done 1 - namafile'
-        Write-Host '  todo undone 1 - namafile'
-        Write-Host '  todo remove 1 - namafile'
+        Write-Host '  todo add "task" namafile'
+        Write-Host '  todo list namafile'
+        Write-Host '  todo done 1 namafile'
+        Write-Host '  todo undone 1 namafile'
+        Write-Host '  todo remove 1 namafile'
         Write-Host '  todo files'
         Write-Host ""
         Write-Host "Saat POMO aktif, aktivitas TODO otomatis dicatat."
@@ -733,7 +798,7 @@ function todo {
                     Write-Host (
                         "{0,3}. [ ] {1}" -f
                         $taskNo,
-                        $Matches[1]
+                        (Format-MarkdownText $Matches[1])
                     )
 
                     $taskNo++
@@ -743,7 +808,7 @@ function todo {
                     Write-Host (
                         "{0,3}. [x] {1}" -f
                         $taskNo,
-                        $Matches[1]
+                        (Format-MarkdownText $Matches[1])
                     ) -ForegroundColor Green
 
                     $taskNo++
@@ -784,7 +849,7 @@ function todo {
             if ([string]::IsNullOrWhiteSpace($Text)) {
 
                 Write-Host ""
-                Write-Host 'Usage: todo add "task" - namafile'
+                Write-Host 'Usage: todo add "task" namafile'
                 Write-Host ""
 
                 return
@@ -806,7 +871,7 @@ function todo {
             Write-Host "Ditambahkan: $Text" -ForegroundColor Green
             Write-Host "File: $FileName.md"
 
-            todo list - $FileName
+            todo list $FileName
         }
 
 
@@ -830,17 +895,44 @@ function todo {
                 return
             }
 
+            # Hitung TODO
+            $tasks = @(
+                $lines |
+                Where-Object {
+                    $_ -match '^- \[[ xX]\] '
+                }
+            )
+
+            $total = $tasks.Count
+
+            $done = @(
+                $tasks |
+                Where-Object {
+                    $_ -match '^- \[[xX]\] '
+                }
+            ).Count
+
+            # Progress
+            if ($total -gt 0) {
+
+                Show-TodoProgress `
+                    -Total $total `
+                    -Done $done
+            }
+
+            Write-Host "--------------------------------"
+
             $i = 1
 
             foreach ($line in $lines) {
 
                 if ($line -match '^- \[ \] (.*)$') {
 
-                    Write-Host "$i. [ ] $($Matches[1])"
+                    Write-Host "$i. [ ] $(Format-MarkdownText $Matches[1])"
                 }
                 elseif ($line -match '^- \[[xX]\] (.*)$') {
 
-                    Write-Host "$i. [x] $($Matches[1])" `
+                    Write-Host "$i. [x] $(Format-MarkdownText $Matches[1])" `
                         -ForegroundColor Green
                 }
                 else {
@@ -863,7 +955,7 @@ function todo {
 
             if ($Arguments.Count -eq 0) {
 
-                Write-Host "Usage: todo done <number> - namafile"
+                Write-Host "Usage: todo done <number> namafile"
 
                 return
             }
@@ -919,7 +1011,7 @@ function todo {
                     "Task $number selesai." `
                     -ForegroundColor Green
 
-                todo list - $FileName
+                todo list $FileName
             }
             else {
 
@@ -937,7 +1029,7 @@ function todo {
 
             if ($Arguments.Count -eq 0) {
 
-                Write-Host "Usage: todo undone <number> - namafile"
+                Write-Host "Usage: todo undone <number> namafile"
 
                 return
             }
@@ -992,7 +1084,7 @@ function todo {
                     "Task $number dikembalikan." `
                     -ForegroundColor Yellow
 
-                todo list - $FileName
+                todo list $FileName
             }
         }
 
@@ -1005,7 +1097,7 @@ function todo {
 
             if ($Arguments.Count -eq 0) {
 
-                Write-Host "Usage: todo remove <number> - namafile"
+                Write-Host "Usage: todo remove <number> namafile"
 
                 return
             }
@@ -1072,7 +1164,7 @@ function todo {
                 "Dihapus: $task" `
                 -ForegroundColor Green
 
-            todo list - $FileName
+            todo list $FileName
         }
 
 
@@ -1101,35 +1193,23 @@ function note {
 
     $FileName = "quicknotes"
 
-    if ($Arguments.Count -gt 0) {
+    # Nama file adalah argumen terakhir jika subperintah menerimanya.
+    $minimumArgumentsForFile = switch ($Command) {
+        "list"  { 1 }
+        "view"  { 2 }
+        "rm"    { 2 }
+        "add"   { 3 }
+        default { 0 }
+    }
 
-        $dashIndex = -1
+    if ($Arguments.Count -ge $minimumArgumentsForFile) {
+        $FileName = $Arguments[$Arguments.Count - 1]
 
-        for ($i = 0; $i -lt $Arguments.Count; $i++) {
-
-            if ($Arguments[$i] -eq "-") {
-
-                $dashIndex = $i
-                break
-            }
+        if ($Arguments.Count -gt 1) {
+            $Arguments = @($Arguments[0..($Arguments.Count - 2)])
         }
-
-        if (
-            $dashIndex -ge 0 -and
-            ($dashIndex + 1) -lt $Arguments.Count
-        ) {
-
-            $FileName = $Arguments[$dashIndex + 1]
-
-            if ($dashIndex -gt 0) {
-
-                $Arguments =
-                    $Arguments[0..($dashIndex - 1)]
-            }
-            else {
-
-                $Arguments = @()
-            }
+        else {
+            $Arguments = @()
         }
     }
 
@@ -1148,10 +1228,10 @@ function note {
         Write-Host ""
         Write-Host "NOTE - Catatan bebas dengan timestamp"
         Write-Host "================================"
-        Write-Host 'note add "judul" "isi catatan" - namafile'
-        Write-Host 'note list - namafile'
-        Write-Host 'note view 1 - namafile'
-        Write-Host 'note rm 1 - namafile'
+        Write-Host 'note add "judul" "isi catatan" namafile'
+        Write-Host 'note list namafile'
+        Write-Host 'note view 1 namafile'
+        Write-Host 'note rm 1 namafile'
         Write-Host ""
         Write-Host "Default file: quicknotes.md"
         Write-Host ""
@@ -1241,7 +1321,7 @@ function note {
             ) {
 
                 Write-Host `
-                    'Usage: note add "judul" "isi" - namafile'
+                    'Usage: note add "judul" "isi" namafile'
 
                 return
             }
@@ -1335,7 +1415,7 @@ function note {
             if ($Arguments.Count -eq 0) {
 
                 Write-Host `
-                    "Usage: note view <number> - namafile"
+                    "Usage: note view <number> namafile"
 
                 return
             }
@@ -1406,7 +1486,7 @@ function note {
             if ($Arguments.Count -eq 0) {
 
                 Write-Host `
-                    "Usage: note rm <number> - namafile"
+                    "Usage: note rm <number> namafile"
 
                 return
             }
@@ -1987,10 +2067,10 @@ function pomo {
         Write-Host ""
         Write-Host "Contoh:"
         Write-Host "  pomo start"
-        Write-Host "  todo list - notes"
-        Write-Host "  todo done 1 - notes"
-        Write-Host "  todo list - project"
-        Write-Host "  todo done 2 - project"
+        Write-Host "  todo list notes"
+        Write-Host "  todo done 1 notes"
+        Write-Host "  todo list project"
+        Write-Host "  todo done 2 project"
         Write-Host "  pomo end"
         Write-Host ""
 
