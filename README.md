@@ -9,11 +9,11 @@ Semua data disimpan di folder tetap **`$HOME\PSTools\data\`** (bukan relatif ke 
 | Perintah   | Fungsi                                                        |
 |------------|---------------------------------------------------------------|
 | `pstools`  | Tampilkan daftar semua perintah (menu utama)                  |
-| `todo`     | Checklist task bergaya Markdown (mendukung multi-file)       |
+| `todo`     | Checklist task bergaya Markdown (nested + judul, multi-file)   |
 | `note`     | Catatan bebas dengan timestamp (mendukung multi-file)         |
 | `bm`       | Bookmark direktori, lompat cepat antar folder                 |
 | `snippet`  | Simpan & ambil potongan kode (diambil dari clipboard)         |
-| `pomo`     | Pomodoro / timer fokus sederhana                              |
+| `pomo`     | Pomodoro + time tracking aktivitas TODO                       |
 | `trans`    | Terjemahan cepat via Google Translate (default id → en)       |
 | `uuid`     | Generate GUID baru                                            |
 
@@ -54,34 +54,67 @@ pstools
 Menampilkan ringkasan semua perintah yang tersedia.
 
 ### ✅ Todo — Checklist Task
-Multi-file: tambahkan `- namafile` di akhir perintah untuk memakai file terpisah (default: `notes.md`).
+Multi-file: nama file adalah **argumen terakhir** dari perintah (tanpa pemisah `-`), default: `notes`.
 
 ```powershell
-todo add "Belajar PowerShell"          # Tambah task
-todo list                              # Lihat semua task
-todo done 1                            # Tandai task #1 selesai
-todo undone 1                          # Kembalikan task #1
-todo remove 1                          # Hapus task #1
+todo add "Belajar PowerShell"            # Tambah task
+todo add-child 1 "Baca dokumentasi"      # Tambah subtask di bawah task #1
+todo list                                # Lihat task + progress file aktif
+todo list -a                             # Ringkasan semua file TODO + total gabungan
+todo files                               # Ringkasan + isi semua file TODO
+todo done 1                              # Tandai task #1 selesai
+todo done 1.2                            # Tandai subtask #1.2 selesai
+todo undone 1                            # Kembalikan task #1 (berserta semua child)
+todo remove 1                            # Hapus task #1 (berserta semua child)
+todo open                                # Edit file TODO aktif manual di editor
+todo help                                # Help bawaan
 
-# Pakai file terpisah
-todo add "Siapkan demo" - proyek
-todo list - proyek
-todo done 1 - proyek
+# Pakai file terpisah (nama file di akhir)
+todo add "Siapkan demo" proyek
+todo list proyek
+todo done 1 proyek
 ```
-- Data: `data\notes.md` (atau `data\proyek.md`)
+
+- Nested checklist didukung: penomoran bertingkat `1`, `1.1`, `1.1.2` mengikuti indentasi di file Markdown.
+- `todo done` / `undone` / `remove` pada sebuah parent juga impacting seluruh child-nya, dan meminta konfirmasi (`y` / `yes` / `ya`) bila parent punya child.
+- `todo done` menandai parent sebagai selesai otomatis bila semua child-nya sudah selesai.
+- `todo list` menampilkan progress bar + persentase; `todo list -a` mengelompokkan file menjadi `TODO BERJALAN` / `TODO SELESAI (100%)` plus total gabungan, dan mencantumkan file kosong terpisah.
+- Emphasys Markdown (`**tebal**`, `*miring*`, `***tebal miring***`) dirender di terminal tanpa mengubah isi file.
+- File TODO terakhir yang dipakai disimpan di `$Global:PSToolsLastTodoFile` (default `notes`).
+- Data: `data\<namafile>.md`
+- Editor `todo open` bisa diganti: `$Global:PSToolsTodoEditor = "kode"` (default `vim`)
+
+#### 🏷️ Judul file TODO
+Setiap file TODO boleh punya judul, disimpan sebagai heading `# judul` di baris paling atas file dan ditampilkan di `todo list` / `todo files` / `todo list -a`.
+
+```powershell
+todo add "Belajar PowerShell" notes "PowerShell Learning"   # posisional
+todo add "Belajar PowerShell" notes -t "PowerShell Learning" # flag -t / --title
+todo add "Task baru" proyek --title="Proyek Klien"           # satu token
+
+todo title notes                                            # lihat judul
+todo title notes "PowerShell Learning 2026"                  # set / ganti judul
+```
+
+- Judul otomatis dibuat saat pertama kali diberikan, dan diganti (bukan diduplikasi) kalau sudah ada.
+- Bentuk **posisional** hanya aktif untuk `add` / `add-child` dan hanya bila jumlah argumen tepat (teks task satu token). Kalau teks task panjang dan tidak diapit tanda kutip, pakai flag `-t "judul"` supaya tidak salah dipotong menjadi nama file.
+- Nama file pada bentuk posisional harus tanpa spasi dan tidak diawali `-`.
 
 ### 📝 Note — Catatan Bebas dengan Timestamp
-Multi-file juga, default: `quicknotes.md`.
+Multi-file juga (nama file di akhir), default: `quicknotes.md`.
 
 ```powershell
 note add "judul" "isi catatan"         # Tambah note baru
 note list                              # Lihat daftar note
 note view 1                            # Lihat isi note #1
 note rm 1                              # Hapus note #1
+note help
 
 # Pakai file terpisah
-note add "Ide rapat" "Catat target Q3" - rapat
-note list - rapat
+note add "Ide rapat" "Catat target Q3" rapat
+note list rapat
+note view 1 rapat
+note rm 1 rapat
 ```
 - Menambah note dengan judul yang sama akan **menggabungkan** isinya (dengan timestamp baru), bukan membuat duplikat.
 - Data: `data\quicknotes.md`
@@ -95,6 +128,7 @@ bm add doks C:\Users\kamu\Documents   # Simpan path tertentu
 bm go proyek                           # Pindah ke folder yang di-bookmark
 bm list                                # Lihat semua bookmark
 bm rm proyek                           # Hapus bookmark
+bm help
 ```
 - Data: `data\bookmarks.md`
 
@@ -108,26 +142,65 @@ snippet save myfunction python         # Simpan isi clipboard
 snippet list                           # Lihat semua snippet
 snippet get myfunction                 # Tampilkan + salin ke clipboard
 snippet rm myfunction                  # Hapus snippet
+snippet help
 ```
+- `snippet save` dengan nama yang sama akan menimpa snippet lama.
 - Data: `data\snippets.md`
 
-### ⏱️ Pomo — Timer Pomodoro
+### ⏱️ Pomo — Pomodoro + Time Tracking TODO
+Pomo **tidak memblokir** PowerShell. Kamu tetap bebas menjalankan perintah lain, dan aktivitas TODO otomatis dicatat per task.
+
 ```powershell
-pomo start [menit]   # Fokus, default 25 menit
-pomo break [menit]   # Istirahat, default 5 menit
-pomo 15              # Fokus langsung 15 menit
+pomo start     # Mulai sesi fokus
+pomo status    # Sesi aktif: waktu mulai, elapsed, task aktif
+pomo end       # Tutup sesi + tampilkan statistik hari ini
+pomo stats     # Statistik POMO hari ini saja
+pomo reset     # Hapus seluruh histori (perlu konfirmasi YES)
+pomo help
 ```
-- Tekan `Ctrl+C` untuk berhenti lebih awal.
+
+Contoh alur:
+```powershell
+pomo start
+todo list notes
+todo done 1 notes          # task ini jadi task aktif
+todo add-child 1 "rapikan" notes
+todo done 1.1 notes
+pomo end
+```
+
+- Setiap operasi `todo add` / `add-child` / `done` / `undone` saat POMO aktif menutup segment task sebelumnya dan membuka segment baru, sehingga waktu per task terakumulasi (per task + per segment).
+- Task yang dihapus lewat `todo remove` akan menutup segment-nya terlebih dulu.
+- `pomo end` menyimpan sesi ke histori lalu menampilkan statistik hari ini: durasi per task, total focus, dan jumlah sesi.
+- Data: `data\pomodoro.json` (state sesi aktif) & `data\pomodoro-history.json` (histori).
 
 ### 🔧 Utilitas Lainnya
 
 ```powershell
 trans "Halo"                    # id → en (default)
 trans "Halo" en id              # en → id
-trans "Halo" id ja              # id → jepang
+trans "Halo" id ja              # id → Jepang
+trans help
 
-uuid            # Generate 1 GUID baru
+uuid                            # Generate 1 GUID baru
+uuid help
 ```
+
+> `trans` memakai endpoint publik Google Translate, jadi butuh koneksi internet.
+
+---
+
+## Konfigurasi
+
+Semua konfigurasi memakai variabel global, bisa diubah di `$PROFILE` **setelah** baris dot-source.
+
+| Variabel                        | Default              | Keterangan                                  |
+|---------------------------------|----------------------|---------------------------------------------|
+| `$Global:PSToolsDataDir`        | `$HOME\PSTools\data` | Lokasi seluruh data PSTools                 |
+| `$Global:PSToolsLastTodoFile`   | `notes`              | File TODO terakhir yang dipakai             |
+| `$Global:PSToolsTodoEditor`     | `vim`                | Editor untuk `todo open`                    |
+| `$Global:PSToolsPomoStateFile`  | `data\pomodoro.json` | State sesi POMO yang sedang aktif           |
+| `$Global:PSToolsPomoHistoryFile`| `data\pomodoro-history.json` | Histori sesi POMO                 |
 
 ---
 
@@ -138,10 +211,12 @@ PSTools/
 ├── PSTools.ps1     # Semua fungsi & perintah
 ├── README.md       # Dokumentasi ini
 └── data/           # Data pribadi (TIDAK ikut di-upload, di-.gitignore)
-    ├── notes.md
-    ├── quicknotes.md
+    ├── notes.md            # file TODO default (bisa diganti, diawali # judul)
+    ├── quicknotes.md       # file NOTE default (bisa diganti)
     ├── bookmarks.md
     ├── snippets.md
+    ├── pomodoro.json       # state sesi POMO aktif
+    ├── pomodoro-history.json
     └── ...
 ```
 

@@ -43,6 +43,9 @@ if (-not (Test-Path $Global:PSToolsDataDir)) {
 # File TODO terakhir yang aktif
 $Global:PSToolsLastTodoFile = "notes"
 
+# Editor untuk 'todo open'
+$Global:PSToolsTodoEditor = "vim"
+
 # File state POMO
 $Global:PSToolsPomoStateFile = Join-Path $Global:PSToolsDataDir "pomodoro.json"
 
@@ -650,6 +653,206 @@ function pstools {
 #  TODO
 # =========================================================
 
+function Get-TodoItems {
+    param(
+        [string[]]$Lines
+    )
+
+    $items = [System.Collections.Generic.List[object]]::new()
+    $stack = [System.Collections.Generic.List[object]]::new()
+    $topLevelCount = 0
+
+    for ($lineIndex = 0; $lineIndex -lt $Lines.Count; $lineIndex++) {
+        $line = $Lines[$lineIndex]
+
+        if ($line -notmatch '^(\s*)- \[([ xX])\] (.*)$') {
+            continue
+        }
+
+        $indentText = $Matches[1]
+        $statusText = $Matches[2]
+        $taskText = $Matches[3]
+        $indent = $indentText.Length
+
+        while (
+            $stack.Count -gt 0 -and
+            $stack[$stack.Count - 1].Indent -ge $indent
+        ) {
+            $stack.RemoveAt($stack.Count - 1)
+        }
+
+        $parent = if ($stack.Count -gt 0) {
+            $stack[$stack.Count - 1]
+        }
+        else {
+            $null
+        }
+
+        if ($null -eq $parent) {
+            $topLevelCount++
+            $parts = @($topLevelCount)
+        }
+        else {
+            $parts = @($parent.Parts + @($parent.Children.Count + 1))
+        }
+
+        $item = [pscustomobject]@{
+            LineIndex        = $lineIndex
+            Indent           = $indent
+            Depth            = $stack.Count
+            Parts            = $parts
+            Number           = ($parts -join '.')
+            Done             = $statusText -match '[xX]'
+            Text             = $taskText
+            Parent           = $parent
+            Children         = @()
+        }
+
+        if ($null -ne $parent) {
+            $parent.Children = @($parent.Children) + @($item)
+        }
+
+        $items.Add($item)
+        $stack.Add($item)
+    }
+
+    return @($items)
+}
+
+function Get-TodoItemDescendants {
+    param(
+        [object]$Item,
+        [object[]]$Items
+    )
+
+    return @(
+        $Items | Where-Object {
+            $current = $_.Parent
+            $isDescendant = $false
+
+            while ($null -ne $current) {
+                if ($current.LineIndex -eq $Item.LineIndex) {
+                    $isDescendant = $true
+                    break
+                }
+
+                $current = $current.Parent
+            }
+
+            $isDescendant
+        }
+    )
+}
+
+function Get-TodoItemAncestors {
+    param(
+        [object]$Item
+    )
+
+    $ancestors = [System.Collections.Generic.List[object]]::new()
+    $current = $Item.Parent
+
+    while ($null -ne $current) {
+        $ancestors.Insert(0, $current)
+        $current = $current.Parent
+    }
+
+    return @($ancestors)
+}
+
+function Set-TodoItemStatus {
+    param(
+        [System.Collections.Generic.List[string]]$Lines,
+        [object]$Item,
+        [bool]$Done
+    )
+
+    $replacement = if ($Done) { '- [x]' } else { '- [ ]' }
+
+    $Lines[$Item.LineIndex] = $Lines[$Item.LineIndex] -replace `
+        '^(\s*)- \[[ xX]\]', `
+        "`$1$replacement"
+
+    $Item.Done = $Done
+}
+
+function Get-TodoTitle {
+    param(
+        [string]$Path
+    )
+
+    if (!(Test-Path $Path)) {
+        return ""
+    }
+
+    $lines = @(Get-Content $Path)
+
+    foreach ($line in $lines) {
+        if ($line -match '^\s*#{1,6}\s+(.+?)\s*$') {
+            return $matches[1]
+        }
+    }
+
+    return ""
+}
+
+
+function Set-TodoTitle {
+    param(
+        [string]$Path,
+        [string]$Title
+    )
+
+    if ([string]::IsNullOrWhiteSpace($Title)) {
+        return
+    }
+
+    $Title = $Title.Trim()
+    $lines = [System.Collections.Generic.List[string]](
+        @(Get-Content $Path)
+    )
+
+    $headingIndex = -1
+
+    for ($lineIndex = 0; $lineIndex -lt $lines.Count; $lineIndex++) {
+        if ($lines[$lineIndex] -match '^\s*#{1,6}\s+') {
+            $headingIndex = $lineIndex
+            break
+        }
+    }
+
+    if ($headingIndex -ge 0) {
+        $lines[$headingIndex] = "# $Title"
+    }
+    else {
+        $lines.Insert(0, "")
+        $lines.Insert(0, "# $Title")
+    }
+
+    $lines | Set-Content `
+        $Path `
+        -Encoding UTF8
+}
+
+
+function Confirm-TodoParentOperation {
+    param(
+        [object]$Item,
+        [object[]]$Items,
+        [string]$Action
+    )
+
+    $answer = Read-Host (
+        "Parent {0} memiliki {1} child. {2} parent dan semua child? (y/N)" -f `
+        $Item.Number,
+        (Get-TodoItemDescendants -Item $Item -Items $Items).Count,
+        $Action
+    )
+
+    return $answer -match '^(y|yes|ya)$'
+}
+
+
 function todo {
 
     param(
@@ -657,29 +860,116 @@ function todo {
         [string]$Command,
 
         [Parameter(Position=1, ValueFromRemainingArguments=$true)]
-        [string[]]$Arguments
+        [string[]]$TodoArguments,
+
+        [switch]$All,
+
+        [Alias('t')]
+        [string]$Title
     )
 
+
     $FileName = $Global:PSToolsLastTodoFile
+    $showAll = $All.IsPresent
+
+    if ($Command -eq "list" -and $null -ne $TodoArguments) {
+        $allArgument = @($TodoArguments | Where-Object { $_ -eq "-a" -or $_ -eq "--all" })
+
+        if ($allArgument.Count -gt 0) {
+            $showAll = $true
+            $TodoArguments = @($TodoArguments | Where-Object { $_ -ne "-a" -and $_ -ne "--all" })
+        }
+    }
+
+    $titleArgument = $Title
+
+    # Judul juga bisa ditulis sebagai satu token: -t=judul / --title=judul
+    if (
+        [string]::IsNullOrWhiteSpace($titleArgument) -and
+        $null -ne $TodoArguments
+    ) {
+
+        $argumentsWithoutTitle = [System.Collections.Generic.List[string]]::new()
+
+        foreach ($currentArgument in $TodoArguments) {
+
+            if ($currentArgument -match '^-{1,2}t(?:itle)?=(.+)$') {
+                $titleArgument = $matches[1]
+                continue
+            }
+
+            $argumentsWithoutTitle.Add($currentArgument)
+        }
+
+        $TodoArguments = @($argumentsWithoutTitle)
+    }
+
+    # Judul juga bisa posisional (argumen terakhir) untuk add & add-child:
+    #   todo add "task" namafile "judul"
+    # Jumlah argumen harus persis, supaya teks task yang panjang & tanpa tanda
+    # kutip tidak salah dipotong menjadi namafile + judul.
+    $argumentsForPositionalTitle = switch ($Command) {
+        "add"       { 3 }
+        "add-child" { 4 }
+        default     { 0 }
+    }
+
+    if (
+        [string]::IsNullOrWhiteSpace($titleArgument) -and
+        $argumentsForPositionalTitle -gt 0 -and
+        $TodoArguments.Count -eq $argumentsForPositionalTitle
+    ) {
+
+        $fileCandidate = $TodoArguments[$TodoArguments.Count - 2]
+
+        # Nama file harus tampak seperti nama file (tanpa spasi, tanpa '-' di depan)
+        if ($fileCandidate -match '^[\w][\w.-]*$') {
+
+            $titleArgument = $TodoArguments[$TodoArguments.Count - 1]
+            $TodoArguments = @($TodoArguments[0..($TodoArguments.Count - 2)])
+        }
+    }
 
     # Nama file adalah argumen terakhir jika subperintah menerimanya.
     $minimumArgumentsForFile = switch ($Command) {
-        "list"   { 1 }
-        "done"   { 2 }
-        "undone" { 2 }
-        "remove" { 2 }
-        "add"    { 2 }
-        default  { 0 }
+        "list"      { 1 }
+        "done"      { 2 }
+        "undone"    { 2 }
+        "remove"    { 2 }
+        "add"       { 2 }
+        "add-child" { 3 }
+        "open"      { 1 }
+        "title"     { 1 }
+        default     { 0 }
     }
 
-    if ($Arguments.Count -ge $minimumArgumentsForFile) {
-        $FileName = $Arguments[$Arguments.Count - 1]
+    # todo title namafile "judul baru"
+    if (
+        $Command -eq "title" -and
+        $TodoArguments.Count -ge 2
+    ) {
 
-        if ($Arguments.Count -gt 1) {
-            $Arguments = @($Arguments[0..($Arguments.Count - 2)])
+        $FileName = $TodoArguments[0]
+
+        if ([string]::IsNullOrWhiteSpace($titleArgument)) {
+            $titleArgument = $TodoArguments[1]
+        }
+
+        $TodoArguments = @()
+    }
+
+    if (
+        $minimumArgumentsForFile -gt 0 -and
+        $TodoArguments.Count -ge $minimumArgumentsForFile
+    ) {
+
+        $FileName = $TodoArguments[$TodoArguments.Count - 1]
+
+        if ($TodoArguments.Count -gt 1) {
+            $TodoArguments = @($TodoArguments[0..($TodoArguments.Count - 2)])
         }
         else {
-            $Arguments = @()
+            $TodoArguments = @()
         }
     }
 
@@ -707,11 +997,21 @@ function todo {
         Write-Host ""
         Write-Host "USAGE:"
         Write-Host '  todo add "task" namafile'
+        Write-Host '  todo add "task" namafile "judul"'
+        Write-Host '  todo add "task" namafile -t "judul"'
+        Write-Host '  todo add-child 1 "subtask" namafile'
         Write-Host '  todo list namafile'
-        Write-Host '  todo done 1 namafile'
-        Write-Host '  todo undone 1 namafile'
-        Write-Host '  todo remove 1 namafile'
+        Write-Host '  todo list -a'
+        Write-Host '  todo done 1 atau 1.1 namafile'
+        Write-Host '  todo undone 1 atau 1.1 namafile'
+        Write-Host '  todo remove 1 atau 1.1 namafile'
+        Write-Host '  todo open namafile'
         Write-Host '  todo files'
+        Write-Host '  todo title namafile "judul"'
+        Write-Host ""
+        Write-Host "JUDUL:"
+        Write-Host '  Disimpan sebagai heading "# judul" di atas file.'
+        Write-Host '  Posisional (hanya add/add-child) atau flag -t / --title.'
         Write-Host ""
         Write-Host "Saat POMO aktif, aktivitas TODO otomatis dicatat."
         Write-Host ""
@@ -757,12 +1057,7 @@ function todo {
 
             $lines = @(Get-Content $todoFile.FullName)
 
-            $tasks = @(
-                $lines |
-                Where-Object {
-                    $_ -match '^- \[[ xX]\] '
-                }
-            )
+            $tasks = @(Get-TodoItems -Lines $lines)
 
             if ($tasks.Count -eq 0) {
                 continue
@@ -771,7 +1066,7 @@ function todo {
             $done = @(
                 $tasks |
                 Where-Object {
-                    $_ -match '^- \[[xX]\] '
+                    $_.Done
                 }
             ).Count
 
@@ -779,6 +1074,14 @@ function todo {
 
             Write-Host ""
             Write-Host "[$($todoFile.BaseName)]" -ForegroundColor Yellow
+
+            $fileTitle = Get-TodoTitle $todoFile.FullName
+
+            if (
+                ![string]::IsNullOrWhiteSpace($fileTitle)
+            ) {
+                Write-Host "  $fileTitle" -ForegroundColor DarkGray
+            }
 
             Write-Host (
                 "Total: {0} | Done: {1} | Undone: {2}" -f
@@ -789,29 +1092,19 @@ function todo {
 
             Write-Host "────────────────────────────────────────"
 
-            $taskNo = 1
+            foreach ($item in $tasks) {
+                $prefix = ('    ' * $item.Depth)
+                $status = if ($item.Done) { 'x' } else { ' ' }
+                $text = "{0}. [{1}] {2}" -f
+                    $item.Number,
+                    $status,
+                    (Format-MarkdownText $item.Text)
 
-            foreach ($line in $lines) {
-
-                if ($line -match '^- \[ \] (.*)$') {
-
-                    Write-Host (
-                        "{0,3}. [ ] {1}" -f
-                        $taskNo,
-                        (Format-MarkdownText $Matches[1])
-                    )
-
-                    $taskNo++
+                if ($item.Done) {
+                    Write-Host "$prefix$text" -ForegroundColor Green
                 }
-                elseif ($line -match '^- \[[xX]\] (.*)$') {
-
-                    Write-Host (
-                        "{0,3}. [x] {1}" -f
-                        $taskNo,
-                        (Format-MarkdownText $Matches[1])
-                    ) -ForegroundColor Green
-
-                    $taskNo++
+                else {
+                    Write-Host "$prefix$text"
                 }
             }
         }
@@ -837,6 +1130,15 @@ function todo {
 
 
     # -----------------------------------------------------
+    # SET TITLE
+    # -----------------------------------------------------
+
+    if (![string]::IsNullOrWhiteSpace($titleArgument)) {
+        Set-TodoTitle -Path $file -Title $titleArgument
+    }
+
+
+    # -----------------------------------------------------
     # ADD
     # -----------------------------------------------------
 
@@ -844,7 +1146,7 @@ function todo {
 
         "add" {
 
-            $Text = ($Arguments -join " ").Trim()
+            $Text = ($TodoArguments -join " ").Trim()
 
             if ([string]::IsNullOrWhiteSpace($Text)) {
 
@@ -876,18 +1178,237 @@ function todo {
 
 
         # -------------------------------------------------
+        # ADD-CHILD
+        # -------------------------------------------------
+
+        "add-child" {
+
+            if ($TodoArguments.Count -lt 2) {
+
+                Write-Host ""
+                Write-Host 'Usage: todo add-child <number> "task" namafile'
+                Write-Host ""
+
+                return
+            }
+
+            $number = $TodoArguments[0].Trim()
+
+            if ($number -notmatch '^\d+(\.\d+)*$') {
+
+                Write-Host "Nomor tidak valid."
+
+                return
+            }
+
+            $Text = (Join-ArgsFrom $TodoArguments 1).Trim()
+
+            if ([string]::IsNullOrWhiteSpace($Text)) {
+
+                Write-Host ""
+                Write-Host 'Usage: todo add-child <number> "task" namafile'
+                Write-Host ""
+
+                return
+            }
+
+            $lines = [System.Collections.Generic.List[string]](
+                @(Get-Content $file)
+            )
+
+            $items = @(Get-TodoItems -Lines @($lines))
+            $target = $items | Where-Object { $_.Number -eq $number } | Select-Object -First 1
+
+            if ($null -eq $target) {
+
+                Write-Host "Task tidak ditemukan."
+
+                return
+            }
+
+            $descendants = @(Get-TodoItemDescendants -Item $target -Items $items)
+
+            if ($descendants.Count -gt 0) {
+
+                $insertIndex = (
+                    $descendants |
+                    Measure-Object -Property LineIndex -Maximum
+                ).Maximum + 1
+            }
+            else {
+
+                $insertIndex = $target.LineIndex + 1
+            }
+
+            $childIndent = ' ' * ($target.Indent + 2)
+
+            $lines.Insert($insertIndex, "$childIndent- [ ] $Text")
+
+            $lines | Set-Content `
+                $file `
+                -Encoding UTF8
+
+
+            # POMO:
+            # Child baru menjadi task aktif.
+            Register-PomoTodoActivity `
+                -FileName $FileName `
+                -Task $Text
+
+
+            Write-Host ""
+            Write-Host "Ditambahkan child ke $number`: $Text" -ForegroundColor Green
+            Write-Host "File: $FileName.md"
+
+            todo list $FileName
+        }
+
+
+        # -------------------------------------------------
         # LIST
         # -------------------------------------------------
 
         "list" {
 
+            if ($showAll) {
+                $todoFiles = @(
+                    Get-ChildItem `
+                        -Path $Global:PSToolsDataDir `
+                        -Filter "*.md" `
+                        -File |
+                    Where-Object {
+                        $_.Name -notin @(
+                            "bookmarks.md",
+                            "snippets.md"
+                        )
+                    } |
+                    Sort-Object Name
+                )
+
+                Write-Host ""
+                Write-Host "SEMUA TODO" -ForegroundColor Cyan
+                Write-Host "================================"
+
+                $globalTotal = 0
+                $globalDone = 0
+                $emptyFiles = [System.Collections.Generic.List[object]]::new()
+                $activeFiles = [System.Collections.Generic.List[object]]::new()
+                $completedFiles = [System.Collections.Generic.List[object]]::new()
+
+                foreach ($todoFile in $todoFiles) {
+                    $todoLines = @(Get-Content $todoFile.FullName)
+                    $todoTasks = @(Get-TodoItems -Lines $todoLines)
+
+                    if ($todoTasks.Count -eq 0) {
+                        $emptyFiles.Add($todoFile)
+                        continue
+                    }
+
+                    $fileDone = @($todoTasks | Where-Object { $_.Done }).Count
+                    $globalTotal += $todoTasks.Count
+                    $globalDone += $fileDone
+
+                    $fileSummary = [pscustomobject]@{
+                        Name  = $todoFile.BaseName
+                        Title = (Get-TodoTitle $todoFile.FullName)
+                        Total = $todoTasks.Count
+                        Done  = $fileDone
+                    }
+
+                    if ($fileDone -eq $todoTasks.Count) {
+                        $completedFiles.Add($fileSummary)
+                    }
+                    else {
+                        $activeFiles.Add($fileSummary)
+                    }
+                }
+
+                foreach ($fileGroup in @(
+                    [pscustomobject]@{ Title = "TODO BERJALAN"; Files = $activeFiles; Color = "Yellow" }
+                    [pscustomobject]@{ Title = "TODO SELESAI (100%)"; Files = $completedFiles; Color = "Green" }
+                )) {
+                    if ($fileGroup.Files.Count -eq 0) {
+                        continue
+                    }
+
+                    Write-Host ""
+                    Write-Host $fileGroup.Title -ForegroundColor $fileGroup.Color
+                    Write-Host "--------------------------------"
+
+                    foreach ($fileSummary in $fileGroup.Files) {
+                        Write-Host ""
+                        Write-Host $fileSummary.Name -ForegroundColor $fileGroup.Color
+                        if (
+                            ![string]::IsNullOrWhiteSpace(
+                                $fileSummary.Title
+                            )
+                        ) {
+                            Write-Host (
+                                "  {0}" -f $fileSummary.Title
+                            ) -ForegroundColor DarkGray
+                        }
+                        Write-Host (
+                            "Total: {0} | Done: {1} | Undone: {2}" -f
+                            $fileSummary.Total,
+                            $fileSummary.Done,
+                            ($fileSummary.Total - $fileSummary.Done)
+                        )
+                        if ($fileSummary.Done -lt $fileSummary.Total) {
+                            Show-TodoProgress `
+                                -Total $fileSummary.Total `
+                                -Done $fileSummary.Done
+                        }
+                    }
+                }
+
+                Write-Host ""
+                Write-Host "TOTAL GABUNGAN" -ForegroundColor Cyan
+                Write-Host "--------------------------------"
+
+                if ($globalTotal -gt 0) {
+                    Write-Host (
+                        "Total: {0} | Done: {1} | Undone: {2}" -f
+                        $globalTotal,
+                        $globalDone,
+                        ($globalTotal - $globalDone)
+                    )
+                    Show-TodoProgress -Total $globalTotal -Done $globalDone
+                }
+                else {
+                    Write-Host "Belum ada task pada file TODO."
+                }
+
+                if ($emptyFiles.Count -gt 0) {
+                    Write-Host ""
+                    Write-Host "FILE KOSONG / TANPA CHECKLIST" -ForegroundColor DarkGray
+                    foreach ($emptyFile in $emptyFiles) {
+                        Write-Host "- $($emptyFile.BaseName).md" -ForegroundColor DarkGray
+                    }
+                }
+
+                Write-Host ""
+                return
+            }
+
             $lines = @(Get-Content $file)
+            $fileTitle = Get-TodoTitle $file
 
             Write-Host ""
-            Write-Host "$FileName.md"
+            if ([string]::IsNullOrWhiteSpace($fileTitle)) {
+                Write-Host "$FileName.md"
+            }
+            else {
+                Write-Host "$FileName.md" -ForegroundColor DarkGray
+                Write-Host $fileTitle -ForegroundColor Yellow
+            }
             Write-Host "================================"
 
-            if ($lines.Count -eq 0) {
+            # Hitung TODO termasuk child checklist.
+            $tasks = @(Get-TodoItems -Lines $lines)
+
+            $total = $tasks.Count
+
+            if ($total -eq 0) {
 
                 Write-Host "Belum ada task."
                 Write-Host ""
@@ -895,22 +1416,8 @@ function todo {
                 return
             }
 
-            # Hitung TODO
-            $tasks = @(
-                $lines |
-                Where-Object {
-                    $_ -match '^- \[[ xX]\] '
-                }
-            )
+            $done = @($tasks | Where-Object { $_.Done }).Count
 
-            $total = $tasks.Count
-
-            $done = @(
-                $tasks |
-                Where-Object {
-                    $_ -match '^- \[[xX]\] '
-                }
-            ).Count
 
             # Progress
             if ($total -gt 0) {
@@ -922,25 +1429,20 @@ function todo {
 
             Write-Host "--------------------------------"
 
-            $i = 1
+            foreach ($item in $tasks) {
+                $prefix = ('    ' * $item.Depth)
+                $status = if ($item.Done) { 'x' } else { ' ' }
+                $text = "{0}. [{1}] {2}" -f `
+                    $item.Number, `
+                    $status, `
+                    (Format-MarkdownText $item.Text)
 
-            foreach ($line in $lines) {
-
-                if ($line -match '^- \[ \] (.*)$') {
-
-                    Write-Host "$i. [ ] $(Format-MarkdownText $Matches[1])"
-                }
-                elseif ($line -match '^- \[[xX]\] (.*)$') {
-
-                    Write-Host "$i. [x] $(Format-MarkdownText $Matches[1])" `
-                        -ForegroundColor Green
+                if ($item.Done) {
+                    Write-Host "$prefix$text" -ForegroundColor Green
                 }
                 else {
-
-                    Write-Host "$i.    $line"
+                    Write-Host "$prefix$text"
                 }
-
-                $i++
             }
 
             Write-Host ""
@@ -953,19 +1455,16 @@ function todo {
 
         "done" {
 
-            if ($Arguments.Count -eq 0) {
+            if ($TodoArguments.Count -eq 0) {
 
                 Write-Host "Usage: todo done <number> namafile"
 
                 return
             }
 
-            $number = 0
+            $number = $TodoArguments[0].Trim()
 
-            if (![int]::TryParse(
-                $Arguments[0],
-                [ref]$number
-            )) {
+            if ($number -notmatch '^\d+(\.\d+)*$') {
 
                 Write-Host "Nomor tidak valid."
 
@@ -976,48 +1475,65 @@ function todo {
                 @(Get-Content $file)
             )
 
-            if (
-                $number -lt 1 -or
-                $number -gt $lines.Count
-            ) {
+            $items = @(Get-TodoItems -Lines @($lines))
+            $target = $items | Where-Object { $_.Number -eq $number } | Select-Object -First 1
+
+            if ($null -eq $target) {
 
                 Write-Host "Task tidak ditemukan."
 
                 return
             }
 
+            $descendants = @(Get-TodoItemDescendants -Item $target -Items $items)
 
-            if ($lines[$number - 1] -match '^- \[ \] (.*)$') {
-
-                $taskText = $Matches[1]
-
-                $lines[$number - 1] =
-                    $lines[$number - 1] -replace `
-                    '^- \[ \]', `
-                    '- [x]'
-
-                $lines | Set-Content `
-                    $file `
-                    -Encoding UTF8
-
-
-                # POMO:
-                Register-PomoTodoActivity `
-                    -FileName $FileName `
-                    -Task $taskText
-
-
-                Write-Host `
-                    "Task $number selesai." `
-                    -ForegroundColor Green
-
-                todo list $FileName
+            if (
+                $target.Done -and
+                @($descendants | Where-Object { !$_.Done }).Count -eq 0
+            ) {
+                Write-Host "Task sudah selesai."
+                return
             }
-            else {
 
-                Write-Host `
-                    "Task sudah selesai atau bukan TODO."
+            if ($descendants.Count -gt 0) {
+                if (!(Confirm-TodoParentOperation -Item $target -Items $items -Action "Selesaikan")) {
+                    Write-Host "Dibatalkan."
+                    return
+                }
             }
+
+            $taskText = $target.Text
+
+            foreach ($item in @($target) + $descendants) {
+                Set-TodoItemStatus -Lines $lines -Item $item -Done $true
+            }
+
+            $ancestors = @(Get-TodoItemAncestors -Item $target)
+
+            for ($ancestorIndex = $ancestors.Count - 1; $ancestorIndex -ge 0; $ancestorIndex--) {
+                $ancestor = $ancestors[$ancestorIndex]
+
+                if (@($ancestor.Children | Where-Object { !$_.Done }).Count -eq 0) {
+                    Set-TodoItemStatus -Lines $lines -Item $ancestor -Done $true
+                }
+            }
+
+            $lines | Set-Content `
+                $file `
+                -Encoding UTF8
+
+
+            # POMO:
+            Register-PomoTodoActivity `
+                -FileName $FileName `
+                -Task $taskText
+
+
+            Write-Host `
+                "Task $number selesai." `
+                -ForegroundColor Green
+
+            todo list $FileName
         }
 
 
@@ -1027,19 +1543,16 @@ function todo {
 
         "undone" {
 
-            if ($Arguments.Count -eq 0) {
+            if ($TodoArguments.Count -eq 0) {
 
                 Write-Host "Usage: todo undone <number> namafile"
 
                 return
             }
 
-            $number = 0
+            $number = $TodoArguments[0].Trim()
 
-            if (![int]::TryParse(
-                $Arguments[0],
-                [ref]$number
-            )) {
+            if ($number -notmatch '^\d+(\.\d+)*$') {
 
                 Write-Host "Nomor tidak valid."
 
@@ -1050,42 +1563,57 @@ function todo {
                 @(Get-Content $file)
             )
 
-            if (
-                $number -lt 1 -or
-                $number -gt $lines.Count
-            ) {
+            $items = @(Get-TodoItems -Lines @($lines))
+            $target = $items | Where-Object { $_.Number -eq $number } | Select-Object -First 1
+
+            if ($null -eq $target) {
 
                 Write-Host "Task tidak ditemukan."
 
                 return
             }
 
+            $descendants = @(Get-TodoItemDescendants -Item $target -Items $items)
 
-            if ($lines[$number - 1] -match '^- \[[xX]\] (.*)$') {
-
-                $taskText = $Matches[1]
-
-                $lines[$number - 1] =
-                    $lines[$number - 1] -replace `
-                    '^- \[[xX]\]', `
-                    '- [ ]'
-
-                $lines | Set-Content `
-                    $file `
-                    -Encoding UTF8
-
-
-                Register-PomoTodoActivity `
-                    -FileName $FileName `
-                    -Task $taskText
-
-
-                Write-Host `
-                    "Task $number dikembalikan." `
-                    -ForegroundColor Yellow
-
-                todo list $FileName
+            if (
+                !$target.Done -and
+                @($descendants | Where-Object { $_.Done }).Count -eq 0
+            ) {
+                Write-Host "Task belum selesai."
+                return
             }
+
+            if ($descendants.Count -gt 0) {
+                if (!(Confirm-TodoParentOperation -Item $target -Items $items -Action "Kembalikan ke belum selesai")) {
+                    Write-Host "Dibatalkan."
+                    return
+                }
+            }
+
+            $taskText = $target.Text
+
+            foreach ($item in @($target) + $descendants) {
+                Set-TodoItemStatus -Lines $lines -Item $item -Done $false
+            }
+
+            foreach ($ancestor in @(Get-TodoItemAncestors -Item $target)) {
+                Set-TodoItemStatus -Lines $lines -Item $ancestor -Done $false
+            }
+
+            $lines | Set-Content `
+                $file `
+                -Encoding UTF8
+
+            Register-PomoTodoActivity `
+                -FileName $FileName `
+                -Task $taskText
+
+
+            Write-Host `
+                "Task $number dikembalikan." `
+                -ForegroundColor Yellow
+
+            todo list $FileName
         }
 
 
@@ -1095,19 +1623,16 @@ function todo {
 
         "remove" {
 
-            if ($Arguments.Count -eq 0) {
+            if ($TodoArguments.Count -eq 0) {
 
                 Write-Host "Usage: todo remove <number> namafile"
 
                 return
             }
 
-            $number = 0
+            $number = $TodoArguments[0].Trim()
 
-            if (![int]::TryParse(
-                $Arguments[0],
-                [ref]$number
-            )) {
+            if ($number -notmatch '^\d+(\.\d+)*$') {
 
                 Write-Host "Nomor tidak valid."
 
@@ -1118,10 +1643,10 @@ function todo {
                 @(Get-Content $file)
             )
 
-            if (
-                $number -lt 1 -or
-                $number -gt $lines.Count
-            ) {
+            $items = @(Get-TodoItems -Lines @($lines))
+            $target = $items | Where-Object { $_.Number -eq $number } | Select-Object -First 1
+
+            if ($null -eq $target) {
 
                 Write-Host "Task tidak ditemukan."
 
@@ -1129,13 +1654,9 @@ function todo {
             }
 
 
-            $task = $lines[$number - 1]
-
-            $taskText = ""
-
-            if ($task -match '^- \[[ xX]\] (.*)$') {
-                $taskText = $Matches[1]
-            }
+            $task = $lines[$target.LineIndex]
+            $taskText = $target.Text
+            $descendants = @(Get-TodoItemDescendants -Item $target -Items $items)
 
 
             # Jika task yang sedang aktif dihapus,
@@ -1153,7 +1674,15 @@ function todo {
             }
 
 
-            $lines.RemoveAt($number - 1)
+            $lineIndexes = @(
+                @($target) + $descendants |
+                    ForEach-Object { $_.LineIndex } |
+                    Sort-Object -Descending
+            )
+
+            foreach ($lineIndex in $lineIndexes) {
+                $lines.RemoveAt($lineIndex)
+            }
 
             $lines | Set-Content `
                 $file `
@@ -1165,6 +1694,87 @@ function todo {
                 -ForegroundColor Green
 
             todo list $FileName
+        }
+
+
+        # -------------------------------------------------
+        # OPEN
+        # -------------------------------------------------
+
+        "open" {
+
+            $editor = if (
+                ![string]::IsNullOrWhiteSpace($Global:PSToolsTodoEditor)
+            ) {
+                $Global:PSToolsTodoEditor
+            }
+            else {
+                "vim"
+            }
+
+            $editorCommand = Get-Command $editor -ErrorAction SilentlyContinue
+
+            if ($null -eq $editorCommand) {
+                Write-Host ""
+                Write-Host "Editor '$editor' tidak ditemukan." -ForegroundColor Yellow
+                Write-Host 'Set editor lain dengan: $Global:PSToolsTodoEditor = "kode"'
+                Write-Host ""
+                return
+            }
+
+            Write-Host ""
+            Write-Host "Membuka $FileName.md di $editor..." -ForegroundColor Cyan
+            Write-Host ""
+
+            & $editorCommand $file
+        }
+
+
+        # -------------------------------------------------
+        # TITLE
+        # -------------------------------------------------
+
+        "title" {
+
+            $currentTitle = Get-TodoTitle $file
+
+            if ([string]::IsNullOrWhiteSpace($titleArgument)) {
+
+                Write-Host ""
+
+                if (
+                    [string]::IsNullOrWhiteSpace(
+                        $currentTitle
+                    )
+                ) {
+                    Write-Host `
+                        "$FileName.md belum punya judul." `
+                        -ForegroundColor Yellow
+
+                    Write-Host (
+                        'Set dengan: todo title {0} "judul"' -f
+                        $FileName
+                    )
+                }
+                else {
+                    Write-Host `
+                        "$FileName.md" `
+                        -ForegroundColor DarkGray
+
+                    Write-Host $currentTitle -ForegroundColor Yellow
+                }
+
+                Write-Host ""
+
+                return
+            }
+
+            Set-TodoTitle -Path $file -Title $titleArgument
+
+            Write-Host ""
+            Write-Host `
+                "Judul $FileName.md disetel: $titleArgument" `
+                -ForegroundColor Green
         }
 
 
